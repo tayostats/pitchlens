@@ -1,4 +1,6 @@
 """PitchLens studio + fan view.  Run:  streamlit run pitchlens_app.py   (API must be running on :8000)"""
+import re
+import json
 import time
 import requests
 import pandas as pd
@@ -48,7 +50,7 @@ h1,h2,h3{font-family:var(--font-head)!important;color:var(--text-hi)!important}
 [data-testid="stMetricLabel"]{font-size:.7rem!important;letter-spacing:.1em!important;text-transform:uppercase!important;color:var(--text-lo)!important}
 </style>""", unsafe_allow_html=True)
 st.markdown('<div class="hero-wrap"><div class="hero-inner"><div class="hero-eyebrow">Explainable Match Intelligence</div><div class="hero-title">PitchLens</div><div class="hero-meta"><span>Every moment explained. Every fan, their own match.</span> · 100% synthetic match data</div></div></div>', unsafe_allow_html=True)
-API = "http://localhost:8000"
+API = st.sidebar.text_input("API URL", "http://localhost:8000")
 
 
 def get(path, **params):
@@ -61,6 +63,28 @@ def post(path, body):
     r = requests.post(f"{API}{path}", json=body, timeout=90)
     r.raise_for_status()
     return r.json()
+
+
+def speak(text, lang):
+    """Voice-over: Azure AI Speech when configured for this language, otherwise the browser's built-in voice."""
+    st.session_state.playing = False  # stop auto-advance so a rerun doesn't cut the audio off
+    text = re.sub(r"[^\w\s.,:;!?%'’()/\-–·]", "", text).strip()
+    if health.get("azure_speech_enabled") and lang in health.get("azure_voice_langs", []):
+        r = requests.post(f"{API}/voiceover", json={"text": text, "language": lang}, timeout=60)
+        if r.ok:
+            st.audio(r.content, format="audio/mp3", autoplay=True)
+            st.caption("🔊 Azure AI Speech")
+            return
+        st.warning(f"Azure Speech error: {r.text[:140]}")
+    bcp = {"en": "en-GB", "fr": "fr-FR", "pt": "pt-PT", "yo": "yo-NG", "ha": "ha-NG", "ig": "ig-NG", "pcm": "en-NG"}
+    js = (f"<script>const u=new SpeechSynthesisUtterance({json.dumps(text)});u.lang='{bcp.get(lang, 'en-GB')}';"
+          "speechSynthesis.cancel();speechSynthesis.speak(u);</script>")  # text is pre-sanitised above (no < or >)
+    if hasattr(st, "iframe"):
+        st.iframe(js, height=1)
+    else:  # older Streamlit
+        import streamlit.components.v1 as components
+        components.html(js, height=0)
+    st.caption("🔈 Browser voice (no Azure voice for this language / Azure Speech not configured)")
 
 
 try:
@@ -78,9 +102,11 @@ lang_names = {"English": "en", "Français": "fr", "Português": "pt", "Yorùbá"
 lang = lang_names[st.sidebar.selectbox("Language", list(lang_names))]
 club_opts = {"No favourite": None, **{v: k for k, v in meta["teams"].items()}}
 fav = club_opts[st.sidebar.selectbox("Favourite club", list(club_opts))]
-focus = None
+focus, speed_kmh, step_km = None, 30.0, 2.0
 if persona == "player_focus":
     focus = st.sidebar.selectbox("Follow player", [p["name"] for p in players])
+    speed_kmh = st.sidebar.slider("Sprint alert (km/h)", 24, 36, 30)
+    step_km = st.sidebar.slider("Distance alert every (km)", 1.0, 5.0, 2.0, 0.5)
 
 # ---- match clock ------------------------------------------------------------------------------
 st.session_state.setdefault("minute", 0)
@@ -111,18 +137,28 @@ st.markdown(f'''<div class="board" style="--hc:{hc};--ac:{ac}"><div class="t">{H
 <div class="bar" style="background:{ac}"><div style="width:{pct}%;background:{hc}"></div></div>
 <div class="row"><span>◀ {H["name"]} control</span><span><b>{now.state.upper()}</b> · {now.turnovers_per_min} turnovers/min</span><span>{A["name"]} control ▶</span></div>''', unsafe_allow_html=True)
 
-tab_live, tab_stats, tab_narr, tab_recap, tab_json = st.tabs(
-    ["📺 Live overlays", "📊 Match intelligence", "🎙 Narrate a moment", "📝 Recap", "{ } Overlay JSON"])
+tab_live, tab_stats, tab_narr, tab_recap, tab_json, tab_auto = st.tabs(
+    ["📺 Live overlays", "📊 Match intelligence", "🎙 Narrate a moment", "📝 Recap", "{ } Overlay JSON", "🛰 Auto-eventing"])
 
 with tab_live:
-    cards = get("/overlays", minute=minute, persona=persona, language=lang, favorite_team=fav, focus_player=focus, last=8)
+    cards = get("/overlays", minute=minute, persona=persona, language=lang, favorite_team=fav, focus_player=focus, last=8,
+                speed_kmh=speed_kmh, distance_step_km=step_km)
+    if persona == "player_focus" and focus:
+        pf = get("/player/focus", player=focus, minute=minute, speed_kmh=speed_kmh, distance_step_km=step_km)["summary"]
+        st.markdown(f'<div class="section-label">{esc(focus)} · live</div>', unsafe_allow_html=True)
+        for col_, (lab, val) in zip(st.columns(6), [("Passes", f"{pf['passes']} ({pf['pass_accuracy_pct']}%)"), ("Avg difficulty", pf["avg_pass_difficulty"]),
+                                                    ("Shots / xG", f"{pf['shots']} / {pf['xg']}"), ("Tackles", pf["tackles"]),
+                                                    ("Distance", f"{pf['distance_km']} km"), ("Top speed", f"{pf['top_speed_kmh']} km/h")]):
+            col_.metric(lab, val)
     if not cards:
         st.info("Press ▶ Play or drag the minute slider.")
     for c in reversed(cards):
         icon = {"goal": "🥅", "big_chance": "🎯", "press_win": "🪤", "momentum_shift": "🌊", "sprint": "⚡",
-                "milestone": "🏃", "key_pass": "🎩", "player_pulse": "📍"}.get(c["type"], "⏱")
+                "milestone": "🏃", "key_pass": "🎩", "player_pulse": "📍", "player_alert": "🚨"}.get(c["type"], "⏱")
         col = hc if c["team"] == "HOME" else ac if c["team"] == "AWAY" else "#94a3b8"
         st.markdown(f'<div class="card" style="--c:{col}"><div class="h">{icon} {c["show_at_s"] // 60}\' · {esc(c["headline"])}{" ⭐" if c["tone"] == "favorite" else ""}<span class="chip">{c["type"].replace("_", " ")}</span></div><div>{esc(c["body"])}</div><div class="m">{c["layout"]} · priority {c["priority"]} · {c["duration_s"]}s on screen</div></div>', unsafe_allow_html=True)
+    if cards and st.button("🔊 Read latest card aloud"):
+        speak(f"{cards[-1]['headline']}. {cards[-1]['body']}", lang)
 
 with tab_stats:
     st.markdown('<div class="section-label">Head to Head</div>', unsafe_allow_html=True)
@@ -155,20 +191,52 @@ with tab_narr:
             st.write(pick["why"])
             st.json(pick["facts"])
         if st.button("Narrate with Claude"):
-            r = post("/narrate", dict(moment_id=pick["id"], persona=persona, language=lang, favorite_team=fav, focus_player=focus))
-            st.success(r["text"])
-            st.caption(f"engine: {r['engine']}")
+            st.session_state["narration"] = post("/narrate", dict(moment_id=pick["id"], persona=persona, language=lang, favorite_team=fav, focus_player=focus))
+        if st.session_state.get("narration"):
+            n = st.session_state["narration"]
+            st.success(n["text"])
+            st.caption(f"engine: {n['engine']}")
+            if st.button("🔊 Voice-over", key="vo_narr"):
+                speak(n["text"], lang)
 
 with tab_recap:
     if st.button("Generate recap up to this minute"):
         with st.spinner("Writing recap..."):
-            r = post("/recap", dict(minute=minute, persona=persona, language=lang, favorite_team=fav, focus_player=focus))
-        st.write(r["recap"])
-        st.caption(f"engine: {r['engine']}")
+            st.session_state["recap"] = post("/recap", dict(minute=minute, persona=persona, language=lang, favorite_team=fav, focus_player=focus))
+    if st.session_state.get("recap"):
+        rc = st.session_state["recap"]
+        st.write(rc["recap"])
+        st.caption(f"engine: {rc['engine']}")
+        if st.button("🔊 Voice-over", key="vo_recap"):
+            speak(rc["recap"], lang)
 
 with tab_json:
     st.caption("Machine-readable, timecoded cards a graphics/rendering layer can consume. Live version: GET /stream (SSE).")
     st.json(cards[-3:] if cards else [])
+
+with tab_auto:
+    st.markdown('<div class="section-label">Auto-eventing hook</div>', unsafe_allow_html=True)
+    st.write("A video model (player and ball tracking) posts frames to `POST /autoevent/tracking`; PitchLens derives **pass and speed metrics automatically** "
+             "instead of hand-tagging. No model is shipped. Below, frames are **simulated** from the synthetic truth plus tracking noise, then scored.")
+    a1, a2 = st.columns(2)
+    win = a1.slider("Window (match minutes)", 0, 90, (0, 45))
+    noise = a2.slider("Tracking noise (pitch units, ~1.05 m each)", 0.0, 2.0, 0.4, 0.1)
+    if st.button("Run simulated detector"):
+        st.session_state["auto"] = post(f"/autoevent/simulate?from_s={win[0] * 60}&to_s={win[1] * 60}&noise={noise}", {})
+    if st.session_state.get("auto"):
+        au = st.session_state["auto"]
+        for col_, (lab, val) in zip(st.columns(5), [("Frames", au["frames"]), ("Pass recall", f"{au['pass_recall'] * 100:.0f}%"),
+                                                    ("Pass precision", f"{au['pass_precision'] * 100:.0f}%"),
+                                                    ("Ball-speed error", f"±{au['ball_speed_mae_kmh']} km/h"), ("Sprint recall", f"{au['sprint_recall'] * 100:.0f}%")]):
+            col_.metric(lab, val)
+        st.caption(f"Truth: {au['ground_truth']} · Detected: {au['detected']}")
+        st.dataframe(pd.DataFrame(au["sample_events"])[["t", "team", "player", "type", "distance_m", "ball_speed_kmh", "player_speed_kmh"]], width="stretch")
+    with st.expander("Frame contract (what a real detector must send)"):
+        st.code(json.dumps({"frames": [
+            {"t": 12.0, "ball": {"x": 48.2, "y": 51.0}, "holder": {"player": "Declan Rice", "team": "HOME"}},
+            {"t": 13.1, "ball": {"x": 61.5, "y": 44.0}, "holder": {"player": "Bukayo Saka", "team": "HOME"}},
+            {"t": 14.0, "players": [{"player": "Bukayo Saka", "team": "HOME", "x": 62.0, "y": 44.0}]}], "commit": False}, indent=1), language="json")
+        st.caption("Pitch units 0-100 (HOME attacks toward x=100). Holder change + ball movement = pass (distance, ball speed). Position deltas = player speed.")
 
 if st.session_state.playing:
     time.sleep(0.8)

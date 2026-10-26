@@ -31,6 +31,19 @@ Scorelines tell fans *what* happened, not *why it mattered*. PitchLens computes 
 
 ---
 
+## Extras
+
+### Player Focus alerts
+Pick **Player focus** and a player. PitchLens follows that player all match: a live summary strip (passes and accuracy, avg pass difficulty, shots/xG, tackles, distance, top speed) plus **threshold alerts**: sprint speed (default 30 km/h, adjustable), distance milestones (default every 2 km), non-goal shots and difficult passes. Goals and big chances arrive as normal key moments. API: `GET /player/focus?player=&minute=&speed_kmh=&distance_step_km=`; alerts also flow through `/overlays` and `/stream` with `persona=player_focus`.
+
+### Azure AI Speech voice-over
+`POST /voiceover` turns any narration, overlay card or recap into MP3 using Azure neural voices (English, French, Portuguese, and a Nigerian-accented voice for Pidgin). Set `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` in `.env`. `GET /voiceover/voices?locale=en-NG` lists the voices in your region so you can override with `AZURE_VOICE_<LANG>`. I could not confirm Azure neural voices for Yoruba, Hausa or Igbo, so for those the UI falls back to the browser's built-in voice (quality and availability depend on the device).
+
+### Auto-eventing hook (no model shipped)
+`POST /autoevent/tracking` accepts frames from a video model (ball position, current possession holder, optional player positions) and **derives pass and speed metrics automatically** with `tracking_to_events()`: a holder change with ball movement is a pass (distance, ball speed = distance / flight time, success if same team, otherwise a turnover), and position deltas give player speed. Set `commit: true` to feed the events into the live match and re-run interpret and explain; `POST /match/new?empty=true` starts an empty match for a live feed. A real detector (for example YOLO + ByteTrack + pitch homography + ball-possession association) only has to emit the documented `Frame` objects.
+
+`POST /autoevent/simulate` and the **Auto-eventing** tab demo the plumbing without a model: frames are fabricated from the synthetic truth plus tracking noise, then scored (on the default match with 0.4 units of noise: roughly 92% pass recall, 97% precision, ~2 km/h ball-speed error). These numbers measure the converter on simulated input, not a real vision model.
+
 ## Architecture
 
 ```mermaid
@@ -74,12 +87,16 @@ Optional: `ANTHROPIC_MODEL` overrides the default model (`claude-sonnet-5-5`). U
 | `GET /stream?speed=60` | Server-Sent Events, overlays in accelerated real time |
 | `POST /narrate` | Persona and language commentary for one moment |
 | `POST /recap` | Automated match recap |
-| `POST /autoevent/ingest` | Video-model detections in |
+| `POST /autoevent/tracking` | Video-model tracking frames in, pass and speed events out |
+| `POST /autoevent/simulate` | Demo and scoring of the hook with simulated frames |
+| `POST /autoevent/ingest` | Already-structured detections in |
+| `GET /player/focus` | Player Focus summary and threshold alerts |
+| `POST /voiceover` | Azure AI Speech MP3 for any text |
 | `POST /match/new?seed=` | Generate a new synthetic match |
 
 ## Tech stack
 
-Python · FastAPI · Streamlit · Altair · Anthropic Claude API · NumPy-free analytics engine (pure Python)
+Python · FastAPI · Streamlit · Altair · Anthropic Claude API · Azure AI Speech (optional voice-over) · pure-Python analytics engine
 
 ## Repo layout
 
@@ -94,5 +111,6 @@ requirements.txt
 ## Limitations and next steps
 
 - Narration quality in Yoruba, Hausa and Igbo should be reviewed by native speakers before production use.
-- Auto-eventing from video is an integration hook, not a trained model.
+- Auto-eventing from video is an integration hook, not a trained model; its accuracy numbers come from simulated input.
+- Azure voices for Yoruba, Hausa and Igbo are not configured (browser voice fallback).
 - The momentum index weights are hand-tuned, with a clear path to learning them from data.
