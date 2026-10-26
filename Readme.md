@@ -48,7 +48,7 @@ flowchart LR
 ## Quick start
 
 ```bash
-git clone <your-repo-url> && cd pitchlens
+git clone https://github.com/tayostats/pitchlens && cd pitchlens
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
